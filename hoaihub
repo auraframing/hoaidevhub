@@ -47,6 +47,11 @@ local Settings = {
 	AimUpdateInterval = 0.1,
 
 	FPSBoost = false,
+
+	FakeLag = false,
+	FakeLagInterval = 0.10,
+	FakeLagDelay = 0.25,
+
 	UIScale = 1
 }
 
@@ -1090,6 +1095,95 @@ BindHoldButton(
 )
 
 --==================================================
+-- FAKE LAG (LOCAL VISUAL ONLY)
+--==================================================
+
+-- This is only a client-side visual delay for OTHER players.
+-- LocalPlayer is explicitly excluded. It does not change real ping
+-- and it does not send fake network data to the server.
+
+local FakeLagBuffer = {}
+local FakeLagClock = 0
+
+local function ClearFakeLagBuffer()
+	table.clear(FakeLagBuffer)
+end
+
+local function SampleFakeLag()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LP then
+			local character = player.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+
+			if root and root:IsA("BasePart") then
+				local queue = FakeLagBuffer[player]
+
+				if not queue then
+					queue = {}
+					FakeLagBuffer[player] = queue
+				end
+
+				queue[#queue + 1] = {
+					time = os.clock(),
+					pivot = character:GetPivot(),
+				}
+
+				while #queue > 8 do
+					table.remove(queue, 1)
+				end
+			end
+		end
+	end
+end
+
+local function ApplyFakeLag()
+	local now = os.clock()
+
+	for player, queue in pairs(FakeLagBuffer) do
+		if player ~= LP and player.Parent and #queue > 0 then
+			local chosen
+
+			for i = 1, #queue do
+				local snapshot = queue[i]
+				if now - snapshot.time >= Settings.FakeLagDelay then
+					chosen = snapshot
+				else
+					break
+				end
+			end
+
+			if chosen then
+				local character = player.Character
+				if character and character.Parent then
+					pcall(function()
+						character:PivotTo(chosen.pivot)
+					end)
+				end
+			end
+		end
+	end
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	FakeLagBuffer[player] = nil
+end)
+
+RunService.RenderStepped:Connect(function(deltaTime)
+	if not Settings.FakeLag then
+		return
+	end
+
+	FakeLagClock += deltaTime
+
+	if FakeLagClock >= Settings.FakeLagInterval then
+		FakeLagClock = 0
+		SampleFakeLag()
+	end
+
+	ApplyFakeLag()
+end)
+
+--==================================================
 -- AIM
 --==================================================
 
@@ -1358,71 +1452,105 @@ local function DisableVisualEffects(root)
 	end
 end
 
-local function FPSBoost()
+local FPSSavedParts = {}
+local FPSSavedEffects = {}
+local FPSSavedLighting = nil
 
-	if Settings.FPSBoost then
-		return
-	end
+local function SaveAndDisableObject(object)
+	if object:IsA("ParticleEmitter")
+		or object:IsA("Trail")
+		or object:IsA("Beam")
+		or object:IsA("Smoke")
+		or object:IsA("Fire") then
 
-	Settings.FPSBoost =
-		true
-
-	pcall(function()
-
-		Lighting.GlobalShadows =
-			false
-
-		Lighting.EnvironmentDiffuseScale =
-			0
-
-		Lighting.EnvironmentSpecularScale =
-			0
-	end)
-
-	for _, object in ipairs(
-		Lighting:GetChildren()
-	) do
-
-		if object:IsA("PostEffect") then
-
-			object.Enabled =
-				false
+		if FPSSavedParts[object] == nil then
+			FPSSavedParts[object] = object.Enabled
 		end
-	end
 
-	for _, player in ipairs(
-		Players:GetPlayers()
-	) do
+		object.Enabled = false
 
-		if player.Character then
+	elseif object:IsA("BasePart") then
 
-			DisableVisualEffects(
-				player.Character
-			)
+		if FPSSavedParts[object] == nil then
+			FPSSavedParts[object] = object.CastShadow
 		end
+
+		object.CastShadow = false
 	end
 end
 
-workspace.DescendantAdded:Connect(
-	function(object)
+local function DisableVisualEffects(root)
+	for _, object in ipairs(root:GetDescendants()) do
+		SaveAndDisableObject(object)
+	end
+end
 
-		if not Settings.FPSBoost then
-			return
+local function ApplyFPSBoost(state)
+	Settings.FPSBoost = state
+
+	if state then
+		pcall(function()
+			if FPSSavedLighting == nil then
+				FPSSavedLighting = {
+					GlobalShadows = Lighting.GlobalShadows,
+					EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale,
+					EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+				}
+			end
+
+			Lighting.GlobalShadows = false
+			Lighting.EnvironmentDiffuseScale = 0
+			Lighting.EnvironmentSpecularScale = 0
+		end)
+
+		for _, object in ipairs(Lighting:GetChildren()) do
+			if object:IsA("PostEffect") then
+				if FPSSavedEffects[object] == nil then
+					FPSSavedEffects[object] = object.Enabled
+				end
+				object.Enabled = false
+			end
 		end
 
-		if object:IsA(
-			"ParticleEmitter"
-		)
-			or object:IsA("Trail")
-			or object:IsA("Beam")
-			or object:IsA("Smoke")
-			or object:IsA("Fire") then
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player.Character then
+				DisableVisualEffects(player.Character)
+			end
+		end
+	else
+		for object, oldState in pairs(FPSSavedParts) do
+			if object and object.Parent then
+				if object:IsA("BasePart") then
+					object.CastShadow = oldState
+				elseif object:IsA("ParticleEmitter")
+					or object:IsA("Trail")
+					or object:IsA("Beam")
+					or object:IsA("Smoke")
+					or object:IsA("Fire") then
+					object.Enabled = oldState
+				end
+			end
+		end
+		table.clear(FPSSavedParts)
 
-			object.Enabled =
-				false
+		for object, oldState in pairs(FPSSavedEffects) do
+			if object and object.Parent then
+				object.Enabled = oldState
+			end
+		end
+		table.clear(FPSSavedEffects)
+
+		if FPSSavedLighting then
+			pcall(function()
+				Lighting.GlobalShadows = FPSSavedLighting.GlobalShadows
+				Lighting.EnvironmentDiffuseScale = FPSSavedLighting.EnvironmentDiffuseScale
+				Lighting.EnvironmentSpecularScale = FPSSavedLighting.EnvironmentSpecularScale
+			end)
+			FPSSavedLighting = nil
 		end
 	end
-)
+	SaveAndDisableObject(object)
+end)
 
 --==================================================
 -- MAIN TAB
@@ -1513,7 +1641,7 @@ MakeButton(
 			or Colors.Text
 
 		ApplyMovement()
-end
+	end
 )
 
 MakeButton(
@@ -1579,6 +1707,54 @@ MakeInput(
 		ApplyMovement()
 
 		return Settings.Jump
+	end
+)
+
+local MainRow4 =
+	Row(MainPage)
+
+MakeButton(
+	MainRow4,
+	"Fake Lag : OFF",
+	function(button)
+
+		Settings.FakeLag =
+			not Settings.FakeLag
+
+		button.Text =
+			"Fake Lag : "
+			.. (
+				Settings.FakeLag
+				and "ON"
+				or "OFF"
+			)
+
+		button.TextColor3 =
+			Settings.FakeLag
+			and Colors.Success
+			or Colors.Text
+
+		if not Settings.FakeLag then
+			ClearFakeLagBuffer()
+			FakeLagClock = 0
+		end
+	end
+)
+
+MakeInput(
+	MainRow4,
+	Settings.FakeLagDelay,
+	"Lag Delay",
+	function(value)
+
+		Settings.FakeLagDelay =
+			math.clamp(
+				value,
+				0.05,
+				2
+			)
+
+		return Settings.FakeLagDelay
 	end
 )
 
@@ -1837,14 +2013,16 @@ MakeFullButton(
 	FPSRow1,
 	"FPS Boost : OFF",
 	function(button)
-
-		FPSBoost()
+		ApplyFPSBoost(not Settings.FPSBoost)
 
 		button.Text =
-			"FPS Boost : ON"
+			"FPS Boost : "
+			.. (Settings.FPSBoost and "ON" or "OFF")
 
 		button.TextColor3 =
-			Colors.Success
+			Settings.FPSBoost
+			and Colors.Success
+			or Colors.Text
 	end
 )
 
@@ -2325,6 +2503,9 @@ LP.CharacterAdded:Connect(
 
 		task.wait(0.4)
 
+		ClearFakeLagBuffer()
+		FakeLagClock = 0
+
 		table.clear(
 			SavedCollision
 		)
@@ -2343,9 +2524,7 @@ LP.CharacterAdded:Connect(
 		end
 
 		if Settings.FPSBoost then
-			DisableVisualEffects(
-				character
-			)
+			DisableVisualEffects(character)
 		end
 
 		if Settings.FlyEnabled then
@@ -2425,3 +2604,9 @@ OpenButton.Visible = false
 FlyControlFrame.Visible = false
 
 print("HOAI DEV HUB LOADED")
+end
+
+workspace.DescendantAdded:Connect(function(object)
+	if not Settings.FPSBoost then
+		return
+	end
