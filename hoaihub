@@ -92,7 +92,7 @@ Splash.Text = "HOÀI HUB"
 Splash.TextColor3 = Color3.fromRGB(220, 145, 255)
 Splash.TextScaled = true
 Splash.Font = Enum.Font.GothamBold
-Splash.ZIndex = 100
+Splash.ZIndex = 1
 Splash.Parent = ScreenGui
 
 local SplashGradient = Instance.new("UIGradient")
@@ -302,6 +302,14 @@ CreateTab("VISUAL", VisualPage)
 CreateTab("UI", SettingsPage)
 
 MovementPage.Visible = true
+
+--========================================================
+-- MENU BOOT SAFETY
+--========================================================
+
+Main.Visible = true
+OpenButton.Visible = false
+
 
 --========================================================
 -- UI CONTROL HELPERS
@@ -578,6 +586,12 @@ LocalPlayer.CharacterAdded:Connect(function(Character)
 end)
 
 --========================================================
+-- FEATURE SYSTEM
+--========================================================
+
+local __FeatureOK, __FeatureError = pcall(function()
+
+--========================================================
 -- TARGET PAGE
 --========================================================
 
@@ -724,7 +738,7 @@ task.spawn(function()
         if Config.TargetEnabled then
             local NewCache = {}
 
-            -- Chụp lại trạng thái Team Check + Wall Check
+-- Chụp lại trạng thái Team Check + Wall Check
             -- cho toàn bộ player mỗi 0.1 giây.
             for _, Player in ipairs(Players:GetPlayers()) do
                 if Player ~= LocalPlayer then
@@ -1209,10 +1223,17 @@ RunService.RenderStepped:Connect(function()
 
 end)
 
+end)
+
+if not __FeatureOK then
+    warn("[HOÀI HUB] Feature error:", __FeatureError)
+end
+
 --========================================================
 -- START
 --========================================================
 
-SetMenuVisible(true)
+Main.Visible = true
+OpenButton.Visible = false
 
-print("[CHATGPT] HOÀI HUB loaded successfully.")
+print("[CHATGPT] HOÀI HUB menu booted.")
