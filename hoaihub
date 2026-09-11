@@ -416,6 +416,8 @@ AddInput(MovementPage, "Fly Speed", Config.FlySpeed, function(Value)
     Config.FlySpeed = math.clamp(Value, 0, 500)
 end)
 
+local SetNoClip
+
 AddToggle(MovementPage, "No Clip", false, function(State)
     SetNoClip(State)
 end)
@@ -499,8 +501,9 @@ end)
 --========================================================
 
 local NoClipOriginal = setmetatable({}, { __mode = "k" })
+local NoClipParts = setmetatable({}, { __mode = "k" })
 
-local function ApplyNoClipToPart(Part)
+local function TrackNoClipPart(Part)
     if not Part:IsA("BasePart") then
         return
     end
@@ -509,7 +512,32 @@ local function ApplyNoClipToPart(Part)
         NoClipOriginal[Part] = Part.CanCollide
     end
 
-    Part.CanCollide = not Config.NoClipEnabled and NoClipOriginal[Part] or false
+    NoClipParts[Part] = true
+
+    if Config.NoClipEnabled then
+        if Part.CanCollide then
+            Part.CanCollide = false
+        end
+    end
+end
+
+local function ApplyNoClipToPart(Part)
+    if not Part:IsA("BasePart") then
+        return
+    end
+
+    TrackNoClipPart(Part)
+
+    if Config.NoClipEnabled then
+        if Part.CanCollide then
+            Part.CanCollide = false
+        end
+    else
+        local Original = NoClipOriginal[Part]
+        if Original ~= nil and Part.CanCollide ~= Original then
+            Part.CanCollide = Original
+        end
+    end
 end
 
 local function RefreshNoClip()
@@ -520,23 +548,29 @@ local function RefreshNoClip()
 
     for _, Object in ipairs(Character:GetDescendants()) do
         if Object:IsA("BasePart") then
-            ApplyNoClipToPart(Object)
-        end
-    end
-end
-
-local function ClearNoClipCache()
-    local Character = GetCharacter()
-    if Character then
-        for _, Object in ipairs(Character:GetDescendants()) do
-            if Object:IsA("BasePart") and NoClipOriginal[Object] ~= nil then
-                Object.CanCollide = NoClipOriginal[Object]
+            TrackNoClipPart(Object)
+            if Object.CanCollide then
+                Object.CanCollide = false
             end
         end
     end
 end
 
-local function SetNoClip(State)
+local function ClearNoClipCache()
+    for Part in pairs(NoClipParts) do
+        if Part and Part.Parent then
+            local Original = NoClipOriginal[Part]
+            if Original ~= nil and Part.CanCollide ~= Original then
+                Part.CanCollide = Original
+            end
+        end
+
+        NoClipParts[Part] = nil
+        NoClipOriginal[Part] = nil
+    end
+end
+
+SetNoClip = function(State)
     Config.NoClipEnabled = State
 
     if State then
@@ -546,13 +580,15 @@ local function SetNoClip(State)
     end
 end
 
--- Character parts are handled only when they are added or when the toggle changes.
 local function HookNoClipCharacter(Character)
     Character.DescendantAdded:Connect(function(Object)
-        if Config.NoClipEnabled and Object:IsA("BasePart") then
+        if Object:IsA("BasePart") then
             task.defer(function()
                 if Object.Parent then
-                    ApplyNoClipToPart(Object)
+                    TrackNoClipPart(Object)
+                    if Config.NoClipEnabled then
+                        Object.CanCollide = false
+                    end
                 end
             end)
         end
@@ -571,7 +607,12 @@ end
 
 LocalPlayer.CharacterAdded:Connect(function(Character)
     NoClipOriginal = setmetatable({}, { __mode = "k" })
+    NoClipParts = setmetatable({}, { __mode = "k" })
     HookNoClipCharacter(Character)
+
+    if Config.NoClipEnabled then
+        task.defer(RefreshNoClip)
+    end
 end)
 
 --========================================================
@@ -635,6 +676,11 @@ local TargetCache = {}
 -- Giá trị true = target hợp lệ sau lần kiểm tra gần nhất.
 local CurrentTarget = nil
 
+-- Target selection runs separately from camera aiming.
+-- Wall Check + Team Check remain on a strict 0.1s cache.
+local TargetSelectionInterval = 0.05
+local TargetSelectionTick = 0
+
 local function IsTeammate(Player)
     if not Config.TeamCheck then
         return false
@@ -648,6 +694,8 @@ local function IsTeammate(Player)
 end
 
 local function HasLineOfSight(Character)
+    Camera = workspace.CurrentCamera or Camera
+
     if not Config.WallCheck then
         return true
     end
@@ -896,13 +944,41 @@ end)
 -- FIX LAG
 --========================================================
 
+local HiddenObjects = {}
+local ApplyFixLag
+
+local function RestoreFixLag()
+    for Object in pairs(HiddenObjects) do
+        if Object and Object.Parent then
+            for _, Part in ipairs(Object:GetDescendants()) do
+                if Part:IsA("BasePart") then
+                    Part.LocalTransparencyModifier = 0
+                elseif Part:IsA("ParticleEmitter")
+                    or Part:IsA("Trail")
+                    or Part:IsA("Beam")
+                    or Part:IsA("Smoke")
+                    or Part:IsA("Fire")
+                    or Part:IsA("Sparkles") then
+                    Part.Enabled = true
+                end
+            end
+        end
+    end
+
+    table.clear(HiddenObjects)
+end
+
 AddToggle(VisualPage, "Fix Lag", false, function(State)
     Config.FixLag = State
+
+    if State then
+        task.defer(ApplyFixLag)
+    else
+        RestoreFixLag()
+    end
 end)
 
-local HiddenObjects = {}
-
-local function ApplyFixLag()
+ApplyFixLag = function()
     if not Config.FixLag then
         return
     end
@@ -1100,6 +1176,11 @@ RunService:BindToRenderStep(
             return
         end
 
+        Camera = workspace.CurrentCamera or Camera
+        if not Camera then
+            return
+        end
+
         local Target = CurrentTarget
         if not Target or not TargetCache[Target] then
             return
@@ -1107,50 +1188,150 @@ RunService:BindToRenderStep(
 
         local TargetCharacter = Target.Character
         local TargetRoot = GetRoot(TargetCharacter)
-        if not TargetRoot then
+        local TargetHumanoid = TargetCharacter and TargetCharacter:FindFirstChildOfClass("Humanoid")
+
+        if not TargetRoot or not TargetHumanoid or TargetHumanoid.Health <= 0 then
+            CurrentTarget = nil
+            return
+        end
+
+        local CameraPosition = Camera.CFrame.Position
+        local TargetPosition = TargetRoot.Position
+        local Offset = TargetPosition - CameraPosition
+
+        if Offset.Magnitude <= 0.01 then
             return
         end
 
         local Desired = CFrame.lookAt(
-            Camera.CFrame.Position,
-            TargetRoot.Position
+            CameraPosition,
+            TargetPosition
+        )
+
+        local Alpha = math.clamp(
+            Config.TargetSmooth,
+            0.01,
+            1
         )
 
         Camera.CFrame = Camera.CFrame:Lerp(
             Desired,
-            math.clamp(Config.TargetSmooth, 0.01, 1)
+            Alpha
         )
     end
 )
+
+--========================================================
+-- NO CLIP MAINTENANCE
+--========================================================
+
+RunService.Heartbeat:Connect(function()
+    if not Config.NoClipEnabled then
+        return
+    end
+
+    for Part in pairs(NoClipParts) do
+        if Part and Part.Parent then
+            if Part.CanCollide then
+                Part.CanCollide = false
+            end
+        else
+            NoClipParts[Part] = nil
+            NoClipOriginal[Part] = nil
+        end
+    end
+end)
+
+--========================================================
+-- MOVEMENT STATE
+--========================================================
+
+local MovementOriginal = setmetatable({}, { __mode = "k" })
+
+local function CaptureMovementDefaults(Humanoid)
+    if not Humanoid or MovementOriginal[Humanoid] then
+        return
+    end
+
+    MovementOriginal[Humanoid] = {
+        WalkSpeed = Humanoid.WalkSpeed,
+        UseJumpPower = Humanoid.UseJumpPower,
+        JumpPower = Humanoid.JumpPower,
+        JumpHeight = Humanoid.JumpHeight,
+    }
+end
+
+local function RestoreMovementDefaults(Humanoid)
+    local Original = Humanoid and MovementOriginal[Humanoid]
+    if not Original or not Humanoid.Parent then
+        return
+    end
+
+    Humanoid.WalkSpeed = Original.WalkSpeed
+    Humanoid.UseJumpPower = Original.UseJumpPower
+    Humanoid.JumpPower = Original.JumpPower
+    Humanoid.JumpHeight = Original.JumpHeight
+end
 
 --========================================================
 -- MAIN LOOP
 --========================================================
 
 RunService.RenderStepped:Connect(function()
+    Camera = workspace.CurrentCamera or Camera
+
     local Character = GetCharacter()
     local Humanoid = GetHumanoid()
     local Root = GetRoot(Character)
 
+    -- Capture defaults once per humanoid.
+    if Humanoid then
+        CaptureMovementDefaults(Humanoid)
+    end
+
     -- SPEED
-    if Humanoid and Config.SpeedEnabled then
-        if Humanoid.WalkSpeed ~= Config.SpeedValue then
-            Humanoid.WalkSpeed = Config.SpeedValue
+    if Humanoid then
+        if Config.SpeedEnabled then
+            if Humanoid.WalkSpeed ~= Config.SpeedValue then
+                Humanoid.WalkSpeed = Config.SpeedValue
+            end
+        else
+            local Original = MovementOriginal[Humanoid]
+            if Original and Humanoid.WalkSpeed ~= Original.WalkSpeed then
+                Humanoid.WalkSpeed = Original.WalkSpeed
+            end
         end
     end
 
     -- JUMP
-    if Humanoid and Config.JumpEnabled then
-        if not Humanoid.UseJumpPower then
-            Humanoid.UseJumpPower = true
-        end
-        if Humanoid.JumpPower ~= Config.JumpValue then
-            Humanoid.JumpPower = Config.JumpValue
+    if Humanoid then
+        if Config.JumpEnabled then
+            if not Humanoid.UseJumpPower then
+                Humanoid.UseJumpPower = true
+            end
+            if Humanoid.JumpPower ~= Config.JumpValue then
+                Humanoid.JumpPower = Config.JumpValue
+            end
+        else
+            local Original = MovementOriginal[Humanoid]
+            if Original then
+                if Humanoid.UseJumpPower ~= Original.UseJumpPower then
+                    Humanoid.UseJumpPower = Original.UseJumpPower
+                end
+                if Humanoid.JumpPower ~= Original.JumpPower then
+                    Humanoid.JumpPower = Original.JumpPower
+                end
+                if Humanoid.JumpHeight ~= Original.JumpHeight then
+                    Humanoid.JumpHeight = Original.JumpHeight
+                end
+            end
         end
     end
 
     -- MOBILE FLY UI
-    MobileControls.Visible = Config.FlyEnabled
+    if MobileControls.Visible ~= Config.FlyEnabled then
+        MobileControls.Visible = Config.FlyEnabled
+    end
 
     -- FLY
     if Config.FlyEnabled and Root then
@@ -1201,6 +1382,7 @@ RunService.RenderStepped:Connect(function()
         end
     else
         CurrentTarget = nil
+        TargetSelectionTick = 0
         POVCircle.Visible = false
     end
 
