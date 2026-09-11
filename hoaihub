@@ -78,6 +78,7 @@ local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "ChatGPT_HoaiHub"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 1000
 ScreenGui.Parent = PlayerGui
 
 --========================================================
@@ -134,6 +135,7 @@ Main.Size = UDim2.fromOffset(340, 430)
 Main.Position = UDim2.new(0.5, -170, 0.5, -215)
 Main.BackgroundColor3 = Color3.fromRGB(22, 12, 32)
 Main.BorderSizePixel = 0
+Main.ZIndex = 110
 Main.Parent = ScreenGui
 
 local Scale = Instance.new("UIScale")
@@ -195,6 +197,7 @@ OpenButton.Text = "H"
 OpenButton.TextColor3 = Color3.fromRGB(235, 160, 255)
 OpenButton.TextSize = 24
 OpenButton.Font = Enum.Font.GothamBold
+OpenButton.ZIndex = 120
 OpenButton.Visible = false
 OpenButton.Parent = ScreenGui
 
